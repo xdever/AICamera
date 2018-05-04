@@ -1,4 +1,3 @@
-// Copyright 2004-present Facebook. All Rights Reserved.
 
 #ifndef CAFFE2_OPERATORS_PREPEND_DIM_OP_H_
 #define CAFFE2_OPERATORS_PREPEND_DIM_OP_H_
@@ -40,8 +39,9 @@ class PrependDimOp : public Operator<Context> {
 
     if (output != &input) {
       // If we are not doing in-place computation, a copy is needed.
-      context_.template CopyBytes<Context, Context>(
-          input.nbytes(),
+      context_.template CopyItems<Context, Context>(
+          input.meta(),
+          input.size(),
           input.raw_data(),
           output->raw_mutable_data(input.meta()));
     }
@@ -74,8 +74,9 @@ class MergeDimOp : public Operator<Context> {
 
     if (output != &input) {
       // If we are not doing in-place computation, a copy is needed.
-      context_.template CopyBytes<Context, Context>(
-          input.nbytes(),
+      context_.template CopyItems<Context, Context>(
+          input.meta(),
+          input.size(),
           input.raw_data(),
           output->raw_mutable_data(input.meta()));
     }

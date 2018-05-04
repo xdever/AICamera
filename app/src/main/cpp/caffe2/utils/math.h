@@ -16,10 +16,8 @@ extern "C" {
 #include "caffe2/core/common.h"
 #include "caffe2/core/types.h"
 
-#ifndef __CUDACC__
 #include "Eigen/Core"
 #include "Eigen/Dense"
-#endif
 
 namespace caffe2 {
 
@@ -30,7 +28,6 @@ class Tensor;
 // engine specified.
 class DefaultEngine {};
 
-#ifndef __CUDACC__
 // Common Eigen types that we will often use
 template <typename T>
 using EigenMatrixMap =
@@ -54,7 +51,6 @@ using ConstEigenVectorMap =
 template <typename T>
 using ConstEigenVectorArrayMap =
     Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, 1> >;
-#endif
 
 namespace math {
 
@@ -131,6 +127,16 @@ CAFFE2_DECLARE_BINARY_OP(Div);
 
 #undef CAFFE2_DECLARE_BINARY_OP
 
+namespace internal {
+
+// Increase the index digits by one based on dims.
+void IncreaseIndexInDims(const int n, const int* dims, int* index);
+
+// Get index value from dims and index digits.
+int GetIndexFromDims(const int n, const int* dims, const int* index);
+
+} // namespace internal
+
 template <typename T, class Context>
 void ReduceMin(
     const int N,
@@ -144,6 +150,69 @@ void ReduceMax(
     const T* x,
     T* y,
     Tensor<Context>* scratch_ptr,
+    Context* context);
+
+template <typename T, class Context>
+void ReduceMin(
+    const int num_dims,
+    const int* dims,
+    const int num_axes,
+    const int* axes,
+    const T* X,
+    T* Y,
+    Context* context);
+
+template <typename T, class Context>
+void ReduceMax(
+    const int num_dims,
+    const int* dims,
+    const int num_axes,
+    const int* axes,
+    const T* X,
+    T* Y,
+    Context* context);
+
+template <typename T, class Context>
+void ReduceSum(
+    const int num_dims,
+    const int* dims,
+    const int num_axes,
+    const int* axes,
+    const T* X,
+    T* Y,
+    Context* context);
+
+template <typename T, class Context>
+void ReduceMean(
+    const int num_dims,
+    const int* dims,
+    const int num_axes,
+    const int* axes,
+    const T* X,
+    T* Y,
+    Context* context);
+
+// Broadcasts X with X_dims to Y with Y_dims.
+template <typename T, class Context>
+void Broadcast(
+    const int X_ndim,
+    const int* X_dims,
+    const int Y_ndim,
+    const int* Y_dims,
+    const T* X,
+    T* Y,
+    Context* context);
+
+// Computes mean and variance over axes.
+template <typename T, class Context>
+void Moments(
+    const int num_dims,
+    const int* dims,
+    const int num_axes,
+    const int* axes,
+    const T* X,
+    T* mean,
+    T* variance,
     Context* context);
 
 // Adds batch sub-tensors elementwise to output. Stripe is the stripe length
@@ -180,6 +249,16 @@ void Maximum(
     const float alpha,
     const T* x,
     T* y,
+    Context* context);
+
+// Transpose tensor X with dims by axes and write the result to tensor Y.
+template <typename T, class Context>
+void Transpose(
+    const int ndim,
+    const int* dims,
+    const int* axes,
+    const T* X,
+    T* Y,
     Context* context);
 
 // Decaf gemm provides a simpler interface to the gemm functions, with the
@@ -223,10 +302,7 @@ template <typename T, class Context, class Engine = DefaultEngine>
 void GemmBatched(
     const CBLAS_TRANSPOSE TransA,
     const CBLAS_TRANSPOSE TransB,
-    const int A_size,
-    const int A_batches,
-    const int B_size,
-    const int B_batches,
+    const int batch_size,
     const int M,
     const int N,
     const int K,
@@ -257,11 +333,10 @@ void Gemv(
     TensorProto::DataType math_type = TensorProto_DataType_FLOAT);
 
 template <typename T, class Context>
-void Set(const TIndex N, const T alpha, T* X, Context* context);
+void Set(const size_t N, const T alpha, T* X, Context* context);
 
 template <typename T, class Context>
-void RandUniform(const int n, const T a, const T b, T* r,
-                 Context* context);
+void RandUniform(const size_t n, const T a, const T b, T* r, Context* context);
 
 template <typename T, class Context>
 void RandUniformUnique(
@@ -275,7 +350,7 @@ void RandUniformUnique(
 
 template <typename T, class Context>
 void RandGaussian(
-    const int n,
+    const size_t n,
     const T mean,
     const T std,
     T* r,
@@ -412,13 +487,19 @@ void BiasCHW(
   Context* context);
 
 template <class Context>
-void CopyMatrix(const size_t item_size, const int M, const int N, const void* A,
-                const int lda, void* B, const int ldb, Context* context);
+void CopyMatrix(
+    const size_t item_size,
+    const int M,
+    const int N,
+    const void* A,
+    const int lda,
+    void* B,
+    const int ldb,
+    Context* context,
+    TypeMeta::TypedCopy copy = nullptr);
 
 template <typename T, class Context>
 void CopyVector(const int N, const T* A, T* B, Context* context);
-
-uint32_t randomNumberSeed();
 
 // Function uses casting from int to unsigned to compare if value of
 // parameter a is greater or equal to zero and lower than value of
@@ -446,19 +527,6 @@ template <typename T>
 constexpr T roundUp(T a, T b) {
   return divUp<T>(a, b) * b;
 }
-
-// Returns true if the given integer type is a power-of-2 (positive only)
-// Note(jiayq): windows reported an error per
-//     https://github.com/caffe2/caffe2/issues/997
-// and as a result will make it a macro.
-#ifdef _MSC_VER
-#define integerIsPowerOf2(v) ((v) && !((v) & ((v) - 1)))
-#else // _MSC_VER
-template <typename T>
-constexpr bool integerIsPowerOf2(T v) {
-  return (v && !(v & (v - 1)));
-}
-#endif // _MSC_VER
 
 // Returns log2(n) for a positive integer type
 template <typename T>

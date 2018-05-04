@@ -37,7 +37,7 @@ inline vector<TIndex> ToVectorTIndex(const std::vector<int>& src) {
 /**
  * Return product of all dimensions starting from K
  */
-inline TIndex size_from_dim_(int k, vector<TIndex> dims) {
+inline TIndex size_from_dim_(int k, const vector<TIndex>& dims) {
   TIndex r = 1;
   for (int i = k; i < dims.size(); ++i) {
     r *= dims[i];
@@ -46,11 +46,27 @@ inline TIndex size_from_dim_(int k, vector<TIndex> dims) {
 }
 
 // Product of all dims up to
-inline TIndex size_to_dim_(int k, vector<TIndex> dims) {
-  CAFFE_ENFORCE(k < dims.size());
+inline TIndex size_to_dim_(int k, const vector<TIndex>& dims) {
+  CAFFE_ENFORCE(k <= dims.size());
   TIndex r = 1;
   for (int i = 0; i < k; ++i) {
     r *= dims[i];
+  }
+  return r;
+}
+
+// Product of all dims between k and l (not including dims[k] and dims[l])
+inline TIndex size_between_dim_(int k, int l, const vector<TIndex>& dims) {
+  CAFFE_ENFORCE(l < dims.size());
+  TIndex r = 1;
+  if (k < l) {
+    for (int i = k + 1; i < l; ++i) {
+      r *= dims[i];
+    }
+  } else {
+    for (int i = l + 1; i < k; ++i) {
+      r *= dims[i];
+    }
   }
   return r;
 }
@@ -111,9 +127,13 @@ class Tensor {
    * Note that this may have a potential performance hit, since a temporary
    * context object will be created for the memory copy. Prefer explicitly
    * providing a context for copy if you can.
+   *
+   * Since it's a potentially expensive operation - making copy constructor
+   * explicit here. If SrcContext != Context it's actually a typecast
+   * constructor and it should be definitely explicit.
    */
   template <class SrcContext>
-  Tensor(const Tensor<SrcContext>& src) {
+  explicit Tensor(const Tensor<SrcContext>& src) {
     CopyFrom(src);
   }
 
@@ -470,7 +490,7 @@ class Tensor {
     CAFFE_ENFORCE_WITH_CALLER(
         IsType<T>(),
         "Tensor type mismatch, caller expects elements to be ",
-        TypeMeta::Name<T>(),
+        TypeMeta::TypeName<T>(),
         " while tensor contains ",
         meta_.name());
     return static_cast<T*>(data_.get());
@@ -596,6 +616,10 @@ class Tensor {
 
   inline TIndex size_to_dim(int k) const {
     return size_to_dim_(k, dims_);
+  }
+
+  inline TIndex size_between_dim(int k, int l) const {
+    return size_between_dim_(k, l, dims_);
   }
 
   /**
@@ -785,7 +809,8 @@ class TensorPrinter {
   template <class Context>
   void PrintMeta(const Tensor<Context>& tensor);
 
-  string MetaStr(const Tensor<CPUContext>& tensor);
+  template <class Context>
+  string MetaStr(const Tensor<Context>& tensor);
 
  private:
   bool to_file_;
@@ -799,7 +824,8 @@ void TensorPrinter::Print(const Tensor<CPUContext>& tensor) {
   std::stringstream values_stream;
   // One most likely doesn't want to print int64-number of items for visual
   // inspection, so we cast down to int here.
-  int total_count = std::min(tensor.size(), TIndex(limit_));
+  int total_count = static_cast<int>(
+      std::min(tensor.size(), TIndex(limit_)));
   const T* tensor_data = tensor.template data<T>();
   for (int i = 0; i < total_count - 1; ++i) {
     values_stream << tensor_data[i] << ",";
@@ -821,6 +847,18 @@ void TensorPrinter::PrintMeta(const Tensor<Context>& tensor) {
   } else {
     LOG(INFO) << MetaStr(tensor);
   }
+}
+
+template <class Context>
+std::string TensorPrinter::MetaStr(const Tensor<Context>& tensor) {
+  std::stringstream meta_stream;
+  meta_stream << "Tensor " << tensor_name_ << " of type "
+              << tensor.meta().name() << ". Dims: (";
+  for (const auto dim : tensor.dims()) {
+    meta_stream << dim << ",";
+  }
+  meta_stream << "): ";
+  return meta_stream.str();
 }
 
 }  // namespace caffe2

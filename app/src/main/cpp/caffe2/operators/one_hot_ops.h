@@ -68,6 +68,24 @@ class BatchOneHotOp final : public Operator<Context> {
  protected:
   INPUT_TAGS(X, LENS, VALS);
   OUTPUT_TAGS(ONE_HOT);
+
+ private:
+  // allows for fast random access to a given dict and is re-used across runs
+  std::vector<TIndex> valsOffsets_;
+};
+
+template <class Context>
+class BatchBucketOneHotOp final : public Operator<Context> {
+ public:
+  USE_OPERATOR_CONTEXT_FUNCTIONS;
+  BatchBucketOneHotOp(const OperatorDef& operator_def, Workspace* ws)
+      : Operator<Context>(operator_def, ws) {}
+
+  bool RunOnDevice() override;
+
+ protected:
+  INPUT_TAGS(X, LENS, BOUNDARIES);
+  OUTPUT_TAGS(ONE_HOT);
 };
 
 } // namespace caffe2

@@ -1,4 +1,3 @@
-// Copyright 2004-present Facebook. All Rights Reserved.
 
 #ifndef CAFFE2_OPERATORS_RECUDER_FUNCTORS_H_
 #define CAFFE2_OPERATORS_RECUDER_FUNCTORS_H_
@@ -559,7 +558,7 @@ class WeightedSumReducerGradient : public BaseReducerGradient {
  public:
   // which of the original inputs are required for gradient computation
   static constexpr std::array<int, 1> originalInputs() {
-    return {1};
+    return {{1}};
   }
 
   static int numAuxInputsWithGrads(const OperatorDef& def) {
@@ -644,7 +643,7 @@ struct WeightedSumReducerDef {
         1,
         "SCALARS",
         "Scalar multipliers for the input slices. Must be a vector with the "
-        "length matching the first dimension of DATA");
+        "length matching the number of slices");
     schema.Arg(
         "grad_on_weights",
         "Produce also gradient for `weights`. For now it's only supported in "
@@ -762,7 +761,10 @@ class MaxReducer<T, CPUContext> : public BaseReducer {
   using FixedDispatch = FixedValues<1>;
 
   MaxReducer(const Meta& meta, T* out, CPUContext* /*context*/)
-      : out_(out), current_size_(0) {}
+      : out_(out), current_size_(0) {
+    // add a wrapper in Context for it
+    memset(out, 0, sizeof(T) * meta.block_size);
+  }
 
   template <int FixedSize>
   void process(

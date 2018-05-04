@@ -1,9 +1,9 @@
-// Copyright 2004-present Facebook. All Rights Reserved.
 
 #pragma once
 
 #include "caffe2/core/context.h"
 #include "caffe2/core/operator.h"
+#include "caffe2/utils/math.h"
 
 namespace caffe2 {
 
@@ -47,10 +47,14 @@ bool SliceImpl(
       if (end < 0) {
         end = data.dims()[i] + 1 + end;
       }
+      if (start > data.dims()[i]) {
+        start = data.dims()[i];
+      }
+      if (end > data.dims()[i]) {
+        end = data.dims()[i];
+      }
       CAFFE_ENFORCE_GE(start, 0);
       CAFFE_ENFORCE_GE(end, 0);
-      CAFFE_ENFORCE_LT(start, data.dims()[i]);
-      CAFFE_ENFORCE_LE(end, data.dims()[i]);
       CAFFE_ENFORCE_GE(end, start);
       starts_idx[i] = start;
       ends_idx[i] = end;
@@ -205,9 +209,11 @@ class SliceOp : public Operator<Context> {
         statically_inited_(false) {}
 
   bool RunOnDevice() override {
-    auto* output = Output(0);
-    auto& data = Input(0);
+    return RunOnDeviceImpl(Input(0), Output(0));
+  }
 
+ protected:
+  bool RunOnDeviceImpl(const Tensor<Context>& data, Tensor<Context>* output) {
     if (InputSize() > 1) {
       starts_host_.template CopyFrom<Context>(Input(1));
       ends_host_.template CopyFrom<Context>(Input(2));

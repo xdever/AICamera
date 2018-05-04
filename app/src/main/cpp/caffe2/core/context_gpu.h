@@ -4,18 +4,21 @@
 #include <ctime>
 #include <mutex>
 
+#include "caffe2/core/common_cudnn.h"
 #include "caffe2/core/common_gpu.h"
 #include "caffe2/core/context.h"
+#include "caffe2/core/logging.h"
+#include "caffe2/core/numa.h"
 #include "caffe2/core/tensor.h"
 #include "caffe2/core/types.h"
 #include "caffe2/proto/caffe2.pb.h"
-#include "caffe2/core/logging.h"
 
 namespace caffe2 {
 
 enum class CudaMemoryPoolType {
   NONE = 0,
   CUB = 1,
+  THC = 2,
 };
 
 /**
@@ -36,16 +39,18 @@ CudaMemoryPoolType GetCudaMemoryPoolType();
  */
 class ThreadLocalCUDAObjects {
   friend class CUDAContext;
+
  private:
   ThreadLocalCUDAObjects() {
     for (int i = 0; i < CAFFE2_COMPILE_TIME_MAX_GPUS; ++i) {
       cuda_streams_[i] = vector<cudaStream_t>();
       cublas_handles_[i] = vector<cublasHandle_t>();
+      cudnn_handles_[i] = vector<cudnnHandle_t>();
     }
   }
 
   cudaStream_t GetStream(int gpu, int stream_id) {
-    vector<cudaStream_t> &gpu_streams = cuda_streams_[gpu];
+    vector<cudaStream_t>& gpu_streams = cuda_streams_[gpu];
     if (gpu_streams.size() <= stream_id) {
       gpu_streams.resize(stream_id + 1, nullptr);
     }
@@ -59,7 +64,7 @@ class ThreadLocalCUDAObjects {
 
   cublasHandle_t GetHandle(int gpu, int stream_id) {
     DeviceGuard guard(gpu);
-    vector<cublasHandle_t> &gpu_handles = cublas_handles_[gpu];
+    vector<cublasHandle_t>& gpu_handles = cublas_handles_[gpu];
     if (gpu_handles.size() <= stream_id) {
       gpu_handles.resize(stream_id + 1, nullptr);
     }
@@ -76,6 +81,20 @@ class ThreadLocalCUDAObjects {
     return gpu_handles[stream_id];
   }
 
+  cudnnHandle_t GetCudnnHandle(int gpu, int stream_id) {
+    DeviceGuard guard(gpu);
+    vector<cudnnHandle_t>& gpu_handles = cudnn_handles_[gpu];
+    if (gpu_handles.size() <= stream_id) {
+      gpu_handles.resize(stream_id + 1, nullptr);
+    }
+    if (!gpu_handles[stream_id]) {
+      CUDNN_ENFORCE(cudnnCreate(&gpu_handles[stream_id]));
+      CUDNN_ENFORCE(
+          cudnnSetStream(gpu_handles[stream_id], GetStream(gpu, stream_id)));
+    }
+    return gpu_handles[stream_id];
+  }
+
   ~ThreadLocalCUDAObjects() noexcept {
     for (int i = 0; i < CAFFE2_COMPILE_TIME_MAX_GPUS; ++i) {
       for (auto& handle : cublas_handles_[i]) {
@@ -88,10 +107,16 @@ class ThreadLocalCUDAObjects {
           CUDA_CHECK(cudaStreamDestroy(stream));
         }
       }
+      for (auto& handle : cudnn_handles_[i]) {
+        if (handle) {
+          CUDNN_CHECK(cudnnDestroy(handle));
+        }
+      }
     }
   }
   vector<cudaStream_t> cuda_streams_[CAFFE2_COMPILE_TIME_MAX_GPUS];
   vector<cublasHandle_t> cublas_handles_[CAFFE2_COMPILE_TIME_MAX_GPUS];
+  vector<cudnnHandle_t> cudnn_handles_[CAFFE2_COMPILE_TIME_MAX_GPUS];
 };
 
 class CUDAContext final {
@@ -102,7 +127,7 @@ class CUDAContext final {
 
   ~CUDAContext() {
     if (curand_generator_) {
-      CURAND_ENFORCE(curandDestroyGenerator(curand_generator_));
+      CURAND_CHECK(curandDestroyGenerator(curand_generator_));
     }
     FinishDeviceComputation();
   }
@@ -119,9 +144,9 @@ class CUDAContext final {
     ev.Wait(CUDA, this);
   }
 
-  inline void Record(Event* ev) const {
+  inline void Record(Event* ev, const char* err_msg = nullptr) const {
     CAFFE_ENFORCE(ev, "Event must not be null.");
-    ev->Record(CUDA, this);
+    ev->Record(CUDA, this, err_msg);
   }
 
   void FinishDeviceComputation() {
@@ -132,7 +157,9 @@ class CUDAContext final {
     }
   }
 
-  inline int cuda_gpu_id() const { return gpu_id_; }
+  inline int cuda_gpu_id() const {
+    return gpu_id_;
+  }
 
   inline cudaStream_t cuda_stream() {
     return cuda_stream(gpu_id_, stream_id_);
@@ -148,6 +175,10 @@ class CUDAContext final {
 
   cublasHandle_t cublas_handle() {
     return cuda_objects_.GetHandle(gpu_id_, stream_id_);
+  }
+
+  cudnnHandle_t cudnn_handle() {
+    return cuda_objects_.GetCudnnHandle(gpu_id_, stream_id_);
   }
 
   curandGenerator_t& curand_generator() {
@@ -199,6 +230,20 @@ class CUDAContext final {
     CopyBytes<SrcContext, DstContext>(n * meta.itemsize(), src, dst);
   }
 
+  // By default CUDA operators have async device parts
+  static bool HasAsyncPartDefault() {
+    return true;
+  }
+
+  static bool SupportsAsyncScheduling() {
+    return true;
+  }
+
+  static bool IsStreamFree(const DeviceOption& option, int stream_id) {
+    auto stream = CUDAContext::cuda_stream(option.cuda_gpu_id(), stream_id);
+    return cudaStreamQuery(stream) == cudaSuccess;
+  }
+
  protected:
   static void Delete(void* data);
   void set_stream_id(int stream_id) {
@@ -245,7 +290,14 @@ struct PinnedCPUAllocator final : CPUAllocator {
   std::pair<void*, MemoryDeleter> New(size_t nbytes) override {
     void* data;
     std::lock_guard<std::mutex> lock(CUDAContext::mutex());
-    CUDA_ENFORCE(cudaMallocHost(&data, nbytes));
+    if (IsNUMAEnabled()) {
+      auto ptr_and_deleter = baseAllocator_.New(nbytes);
+      data = ptr_and_deleter.first;
+      CAFFE_ENFORCE(data);
+      CUDA_ENFORCE(cudaHostRegister(data, nbytes, cudaHostRegisterDefault));
+    } else {
+      CUDA_ENFORCE(cudaMallocHost(&data, nbytes));
+    }
     memset(data, 0, nbytes);
     return {data, Delete};
   }
@@ -262,16 +314,23 @@ struct PinnedCPUAllocator final : CPUAllocator {
     // But, if one calls CPUContext::New() before any cuda allocations,
     // PinnedCPUAllocator can still delete the corresponding memory.
     std::lock_guard<std::mutex> lock(CUDAContext::mutex());
-    cudaError_t err = cudaFreeHost(data);
-    if (err == cudaErrorInvalidValue) {
-      free(data);
-      // Calling cudaGetLastError will reset the cuda error.
-      cudaGetLastError();
+    if (IsNUMAEnabled()) {
+      CUDA_ENFORCE(cudaHostUnregister(data));
+      DefaultCPUAllocator::Delete(data);
     } else {
-      // For all other errors, still do a cuda check.
-      CUDA_ENFORCE(err);
+      cudaError_t err = cudaFreeHost(data);
+      if (err == cudaErrorInvalidValue) {
+        free(data);
+        // Calling cudaGetLastError will reset the cuda error.
+        cudaGetLastError();
+      } else {
+        // For all other errors, still do a cuda check.
+        CUDA_ENFORCE(err);
+      }
     }
   }
+
+  DefaultCPUAllocator baseAllocator_;
 };
 
 // For simplicity, we will typedef Tensor<CPUContext> to TensorCPU.

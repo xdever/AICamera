@@ -11,11 +11,16 @@
 #include "caffe2/core/logging.h"
 #include "caffe2/core/typeid.h"
 #include "caffe2/proto/caffe2.pb.h"
-#include "caffe2/utils/math.h"
 
 CAFFE2_DECLARE_bool(caffe2_report_cpu_memory_usage);
 
 namespace caffe2 {
+
+/**
+ * A function to generate a random number seed that is unique in a best-effort
+ * basis, using an ever-incrementing seed and the current time.
+ */
+uint32_t RandomNumberSeed();
 
 /**
  * The CPU Context, representing the bare minimum of what a Context class in
@@ -61,11 +66,11 @@ namespace caffe2 {
 class CPUContext final {
  public:
   typedef std::mt19937 rand_gen_type;
-  CPUContext() : random_seed_(math::randomNumberSeed()) {}
+  CPUContext() : random_seed_(RandomNumberSeed()) {}
   explicit CPUContext(const DeviceOption& option)
       : random_seed_(
             option.has_random_seed() ? option.random_seed()
-                                     : math::randomNumberSeed()) {
+                                     : RandomNumberSeed()) {
     CAFFE_ENFORCE_EQ(option.device_type(), CPU);
   }
 
@@ -79,9 +84,10 @@ class CPUContext final {
   inline void WaitEvent(const Event& ev) {
     ev.Wait(CPU, this);
   }
-  inline void Record(Event* ev) const {
+
+  inline void Record(Event* ev, const char* err_msg = nullptr) const {
     CAFFE_ENFORCE(ev, "Event must not be null.");
-    ev->Record(CPU, this);
+    ev->Record(CPU, this, err_msg);
   }
 
   inline void FinishDeviceComputation() {}
@@ -109,9 +115,10 @@ class CPUContext final {
   template <typename T, class SrcContext, class DstContext>
   inline void Copy(size_t n, const T* src, T* dst) {
     if (std::is_fundamental<T>::value) {
-      CopyBytes<SrcContext, DstContext>(n * sizeof(T),
-                                     static_cast<const void*>(src),
-                                     static_cast<void*>(dst));
+      CopyBytes<SrcContext, DstContext>(
+          n * sizeof(T),
+          static_cast<const void*>(src),
+          static_cast<void*>(dst));
     } else {
       for (int i = 0; i < n; ++i) {
         dst[i] = src[i];
@@ -129,11 +136,26 @@ class CPUContext final {
     }
   }
 
+  // By default CPU operators don't have async device parts
+  static bool HasAsyncPartDefault() {
+    return false;
+  }
+
+  static bool SupportsAsyncScheduling() {
+    return false;
+  }
+
+  // CPU streams are not implemented and are silently ignored by CPU ops,
+  // return true to signal executor to schedule a CPU op
+  static bool IsStreamFree(const DeviceOption& /* unused */, int /* unused */) {
+    return true;
+  }
+
  protected:
   // TODO(jiayq): instead of hard-coding a generator, make it more flexible.
   int random_seed_{1701};
   std::unique_ptr<rand_gen_type> random_generator_;
-  static MemoryAllocationReporter reporter_;
+  CAFFE2_API static MemoryAllocationReporter reporter_;
 
  private:
   static void ReportAndDelete(void* ptr) {
